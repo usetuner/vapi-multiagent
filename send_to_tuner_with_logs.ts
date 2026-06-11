@@ -35,9 +35,9 @@
 // CONFIG — fill these in
 // =============================================================================
 const TUNER_BASE_URL = "https://api.usetuner.ai"; // your Tuner API base URL
-const TUNER_API_KEY = "tr_api_5d64e9c3-c52d-4136-860a-d594aa92a3bc";
-const TUNER_WORKSPACE = 10; // your workspace id (number)
-const TUNER_AGENT_ID = "faac4803-5fa3-4566-a9d8-2711c866ef73";
+const TUNER_API_KEY = "api-key";
+const TUNER_WORKSPACE = "workspace-id"; // your workspace id (number)
+const TUNER_AGENT_ID = "agent-id";
 
 type Json = Record<string, any>;
 
