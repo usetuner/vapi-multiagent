@@ -22,7 +22,7 @@
 
 import express, { Request, Response } from "express";
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { fetchVapiLog, sendCallToTuner } from "./send_to_tuner_with_logs";
+import {  sendCallToTuner } from "./send_to_tuner_with_logs";
 
 // Where each end-of-call report is stored as a JSON array.
 
@@ -277,13 +277,7 @@ app.post("/vapi/webhook", async (req: Request, res: Response) => {
 
     const logUrl = message.artifact?.logUrl;
     log(`Fetching VAPI call log${logUrl ? "" : " (no logUrl in payload)"}...`);
-    const vapiLog = await fetchVapiLog(logUrl);
-    if (vapiLog) {
-      log(`VAPI call log ready (${vapiLog.length} lines) — sending log-enriched payload to Tuner`);
-    } else {
-      log("VAPI call log unavailable — sending payload-only to Tuner");
-    }
-      appendReturn(message, vapiLog ?? []);
+ 
     await sendCallToTuner(message);
   }
 
