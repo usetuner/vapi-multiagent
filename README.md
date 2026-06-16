@@ -1,139 +1,99 @@
-# VAPI Multi-Agent Demo
+# VAPI transient agents — Node & Python
 
-A demo server that provisions **transient VAPI voice agents** per inbound call. Each caller gets a personalized assistant built from a fake CRM lookup, with mid-call tool execution (order lookup, appointments, balance check, transfer). When a call ends, the server optionally enriches the payload with VAPI's call log and forwards it to [Tuner](https://usetuner.ai).
+A worked example of **transient VAPI voice agents**: instead of pre-creating an
+assistant in the VAPI dashboard, you hand VAPI a brand-new assistant *inline*,
+per call, in your webhook response. Every caller gets a personalized agent built
+on the fly from a CRM lookup, with real mid-call tool execution, and every
+finished call is forwarded to [Tuner](https://usetuner.ai) for analysis.
 
-The **recommended entry point** is the TypeScript server (`vapi_server.ts`). Python variants are included for comparison.
+The same server is implemented twice — pick your language:
 
-## Prerequisites
+| | |
+|---|---|
+| 🟢 **[`nodeAgent/`](./nodeAgent)** | Express + TypeScript |
+| 🐍 **[`pythonAgent/`](./pythonAgent)** | FastAPI + Python |
 
-- **Node.js 18+** (uses built-in `fetch`)
-- **npm**
-- A [VAPI](https://vapi.ai) account with a phone number or SIP trunk
-- A [Tuner](https://usetuner.ai) workspace (for end-of-call forwarding)
-- A public HTTPS URL for local development (e.g. [ngrok](https://ngrok.com))
+Both expose the identical webhook (`POST /vapi/webhook`), the identical tools,
+and the identical end-of-call → Tuner pipeline. Each folder has its own README
+with setup and run steps.
 
-## Quick start (TypeScript)
+## What "transient" means
 
-### 1. Install dependencies
+A **persistent** agent is created once (via the VAPI API) and lives in your
+dashboard; calls reference it by id. A **transient** agent has no id and no
+prior existence — you return its full config in the `assistant-request`
+webhook, VAPI spins it up for that one call, and it's gone when the call ends.
 
-```bash
-npm install
+Why that's useful:
+
+- **Personalization per call** — bake the caller's name, tier, and account data
+  straight into the system prompt and first message.
+- **No dashboard sprawl** — you don't create (and later clean up) one assistant
+  per caller.
+- **No VAPI API key needed** — the agent lives entirely in your webhook
+  response.
+
+## The flow
+
 ```
-
-### 2. Configure Tuner
-
-Edit the config block at the top of `send_to_tuner_with_logs.ts`:
-
-| Variable | Where to find it |
-|----------|------------------|
-| `TUNER_BASE_URL` | Your Tuner API base URL (default: `https://api.usetuner.ai`) |
-| `TUNER_API_KEY` | Tuner → Workspace Settings → API Keys (`tr_api_…`) |
-| `TUNER_WORKSPACE` | Tuner → Workspace → General Settings (numeric ID) |
-| `TUNER_AGENT_ID` | Create a **Custom API** agent in Tuner, then Agent Settings → Agent Connection |
-
-### 3. Start the server
-
-```bash
-npm run dev
+   ┌─────────┐   1. assistant-request    ┌──────────────────┐
+   │  Caller │ ───────────────────────▶  │   Your webhook   │
+   └─────────┘                           │  /vapi/webhook   │
+        ▲                                └──────────────────┘
+        │                                   │  2. fake CRM lookup
+        │  transient assistant (inline)     │  3. return assistant
+        │ ◀─────────────────────────────────┘     { model, tools, firstMessage }
+        │
+        │  …conversation…
+        │
+        │  4. tool-calls  ──────────────▶  run tool, return { results: [...] }
+        │ ◀─────────────────────────────
+        │
+        │  5. end-of-call-report ───────▶  fetch VAPI call log, persist locally,
+        │                                  forward enriched call to Tuner
 ```
-
-The server listens on **port 8000** by default. Override with:
-
-```bash
-PORT=3000 npm run dev
-```
-
-Verify it's running:
-
-```bash
-curl http://localhost:8000/health
-```
-
-### 4. Expose your local server to the internet
-
-VAPI webhooks must reach your machine. Example with ngrok:
-
-```bash
-ngrok http 8000
-```
-
-Copy the HTTPS forwarding URL (e.g. `https://abc123.ngrok-free.app`).
-
-### 5. Point VAPI at your webhook
-
-In the [VAPI dashboard](https://dashboard.vapi.ai):
-
-1. Open your **Phone Number** (or Assistant / Squad, depending on your setup).
-2. Set the **Server URL** to:
-
-   ```
-   https://<your-public-url>/vapi/webhook
-   ```
-
-3. Save. Place a test call to that number.
-
-## What happens on a call
 
 1. **Inbound call** → VAPI sends an `assistant-request` webhook.
-2. **Fake CRM lookup** → random caller name, tier, balance, and loyalty points.
-3. **Transient assistant** → returned inline in the webhook response (no VAPI API key required).
-4. **Mid-call tools** → when the agent invokes a tool, VAPI POSTs `tool-calls`; the server runs the handler and returns results.
-5. **Call ends** → on `end-of-call-report`, the server fetches the VAPI call log (if available), appends the report to local JSON files, and forwards the call to Tuner.
+2. **CRM lookup** → a fake lookup returns a random caller name, tier, balance,
+   and loyalty points (swap in a real HTTP/DB call for production).
+3. **Transient assistant** → returned inline in the webhook response, with a set
+   of tools the agent may call.
+4. **Mid-call tools** → when the agent invokes a tool, VAPI POSTs a `tool-calls`
+   message to the same webhook; the server runs the handler and returns results
+   the agent reads back to the caller.
+5. **Call ends** → on `end-of-call-report`, the server downloads VAPI's call log
+   (one extra GET, no API key), appends the report to local JSON files, and
+   forwards the call to Tuner with exact per-turn latencies and interruptions.
 
 ### Available tools
 
 | Tool | Purpose |
 |------|---------|
-| `lookupOrder` | Fake order status lookup |
+| `lookupOrder` | Fake order-status lookup |
 | `bookAppointment` | Fake appointment booking |
-| `checkBalance` | Returns CRM balance and loyalty points |
+| `checkBalance` | Returns the CRM balance and loyalty points |
 | `transferToHuman` | Simulated transfer to billing / support / sales |
-| `endCall` | Built-in VAPI tool to hang up |
+| `endCall` | Built-in VAPI tool to hang up (executed by VAPI itself) |
+
+## Sending calls to Tuner
+
+Both agents ship a self-contained Tuner client — `send_to_tuner.ts` /
+`send_to_tuner.py` — that you can drop next to any VAPI server. Call
+`sendCallToTuner(message)` / `send_call_to_tuner(message)` from your
+`end-of-call-report` handler and the finished call (transcript, tool calls, tool
+results, latencies, interruptions) shows up under your Tuner agent. It's
+fire-and-forget and never throws. See the config block at the top of either file
+for the four dashboard values it needs.
 
 ## Local output files
 
-After calls complete, the server writes:
+After calls complete, each server writes (in its own folder, both gitignored):
 
-- `vapi_return.json` — array of `end-of-call-report` payloads
-- `vapi_log_return.json` — latest VAPI call log (JSONL parsed to an array)
+- `vapi_return.json` — array of `end-of-call-report` payloads (with `callLog`)
+- `vapi_log_return.json` — per-call VAPI logs (JSONL parsed to an array)
 
-These are gitignored and meant for local debugging.
+## Also in this repo
 
-## Alternative servers (Python)
-
-### Transient agent (simpler, no tools)
-
-```bash
-pip install fastapi uvicorn
-python vapi_server.py
-```
-
-Listens on port **8000**. Same webhook path: `/vapi/webhook`.
-
-### Persistent agent (creates a dashboard assistant per call)
-
-```bash
-export VAPI_API_KEY="your-vapi-private-key"
-pip install fastapi uvicorn httpx
-python vapi_server_persistent.py
-```
-
-Listens on port **8001**. Requires a VAPI private API key. **Note:** creates a new assistant in your VAPI dashboard on every call.
-
-## Project structure
-
-| File | Description |
-|------|-------------|
-| `vapi_server.ts` | Main TypeScript server (tools + Tuner forwarding) |
-| `send_to_tuner_with_logs.ts` | Tuner integration and call-log enrichment |
-| `send_to_tuner.ts` | Tuner integration without log enrichment |
-| `send_to_tuner.py` | Python version of the Tuner client |
-| `vapi_server.py` | Minimal Python transient-agent server |
-| `vapi_server_persistent.py` | Python server that creates persistent VAPI assistants |
-
-## Troubleshooting
-
-- **Webhook not firing** — confirm the public URL is HTTPS and ends with `/vapi/webhook`.
-- **Calls not appearing in Tuner** — check the four config values in `send_to_tuner_with_logs.ts` and watch server logs for `Tuner:` warnings.
-- **Empty transcript in Tuner** — the `end-of-call-report` must include `artifact.messages`; this depends on your VAPI assistant settings.
-- **Port already in use** — set `PORT` to another value or stop the process on 8000.
+- `vapi_server_persistent.py` — a contrasting **persistent**-agent server that
+  creates a real assistant in your VAPI dashboard per call (requires a VAPI
+  private API key). Kept for comparison with the transient approach above.

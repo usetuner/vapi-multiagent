@@ -22,7 +22,7 @@
 
 import express, { Request, Response } from "express";
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import {  sendCallToTuner } from "./send_to_tuner_with_logs";
+import { fetchVapiLog, sendCallToTuner } from "./send_to_tuner";
 
 // Where each end-of-call report is stored as a JSON array.
 
@@ -269,16 +269,31 @@ app.post("/vapi/webhook", async (req: Request, res: Response) => {
   if (msgType === "end-of-call-report") {
     const endedReason: string = message.endedReason ?? "(none)";
     log(`END-OF-CALL endedReason: ${endedReason}`);
-    const RETURN_FILE = "vapi_return.json";
 
- 
+    // VAPI also fires stub SIP reports (artifact: {}) with no transcript/logUrl.
+    // Skip those — they would wipe vapi_log_return.json and pollute vapi_return.json.
+    if (!isCompleteEndOfCallReport(message)) {
+      log(`Skipping incomplete end-of-call-report (${endedReason}) — no artifact data`);
+      return res.json({});
+    }
+
     const callId: string = message.call?.id ?? "";
     if (callId) callCustomers.delete(callId); // clean up our per-call memory
 
-    const logUrl = message.artifact?.logUrl;
+    const logUrl = message.artifact?.logUrl ?? message.logUrl;
     log(`Fetching VAPI call log${logUrl ? "" : " (no logUrl in payload)"}...`);
- 
-    await sendCallToTuner(message);
+    const vapiLog = await fetchVapiLog(logUrl);
+    if (vapiLog) {
+      log(`VAPI call log ready (${vapiLog.length} lines) — saving locally and sending to Tuner`);
+    } else {
+      log("VAPI call log unavailable — saving payload only, sending payload-only to Tuner");
+    }
+    appendReturn(message, vapiLog);
+
+    const prompt = message.artifact?.messages?.[0]?.message;
+    const metadata = prompt ? { customizable_prompt: prompt } : undefined;
+    await sendCallToTuner(message, metadata, vapiLog);
+    return res.json({});
   }
 
   // Everything else: just acknowledge.
@@ -307,20 +322,49 @@ function safeJson(s: string): Json {
   }
 }
 
-function appendReturn(message: Json,logsData: Json[]): void {
-  const RETURN_FILE = "vapi_return.json";
-  const LOGS_FILE="vapi_log_return.json";
+/** Real end-of-call reports carry artifact data; SIP stubs send `artifact: {}`. */
+function isCompleteEndOfCallReport(message: Json): boolean {
+  const artifact: Json = message.artifact ?? {};
+  return !!(
+    artifact.logUrl ??
+    message.logUrl ??
+    artifact.messages?.length ??
+    message.messages?.length ??
+    artifact.recordingUrl ??
+    message.recordingUrl ??
+    artifact.stereoRecordingUrl ??
+    message.stereoRecordingUrl
+  );
+}
 
-  const reports: Json[] = [];
-  if (existsSync(RETURN_FILE)) {
-    const raw = readFileSync(RETURN_FILE, "utf-8").trim();
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) reports.push(...parsed);
-      else reports.push(parsed);
-    }
-  }
-  reports.push(message);
+function readJsonArray(file: string): Json[] {
+  if (!existsSync(file)) return [];
+  const raw = readFileSync(file, "utf-8").trim();
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function appendReturn(message: Json, logsData: Json[] | null): void {
+  const RETURN_FILE = "vapi_return.json";
+  const LOGS_FILE = "vapi_log_return.json";
+
+  const entry: Json = { ...message };
+  if (logsData?.length) entry.callLog = logsData;
+
+  const reports = readJsonArray(RETURN_FILE);
+  reports.push(entry);
   writeFileSync(RETURN_FILE, JSON.stringify(reports, null, 2) + "\n");
-  writeFileSync(LOGS_FILE, JSON.stringify(logsData ?? [], null, 2) + "\n");
+
+  // Append per-call logs; never overwrite with [] when a fetch fails.
+  if (logsData?.length) {
+    const callId = message.call?.id ?? null;
+    const logs = readJsonArray(LOGS_FILE);
+    logs.push({
+      call_id: callId,
+      ended_reason: message.endedReason ?? null,
+      log: logsData,
+    });
+    writeFileSync(LOGS_FILE, JSON.stringify(logs, null, 2) + "\n");
+  }
 }
